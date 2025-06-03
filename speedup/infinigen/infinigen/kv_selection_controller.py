@@ -1,5 +1,6 @@
 import torch
 import torch.nn.functional as F
+from .mlp_predictor import select_kv_mlp
 
 
 def select_kv(prefetch_idx, k_cache, v_cache):
@@ -61,3 +62,48 @@ def speculate_attention(hidden, p_w_q, p_k_c, n_head, alpha, max_num_kv):
     )[1]
 
     return prefetch_idx
+
+
+def extract_features_for_prediction(hidden, token_idx, position, layer_idx, attention_scores=None):
+    """
+    Extract features from hidden states and other information for MLP prediction.
+    
+    Args:
+        hidden: Hidden states tensor
+        token_idx: Index of the token
+        position: Position in the sequence
+        layer_idx: Current layer index
+        attention_scores: Optional attention scores
+        
+    Returns:
+        features: Tensor of features for prediction
+    """
+    # Basic features
+    features = [
+        float(token_idx),
+        float(position),
+        float(layer_idx)
+    ]
+    
+    # Add hidden state statistics
+    if hidden is not None:
+        hidden_flat = hidden.detach().cpu().numpy().flatten()
+        features.extend([
+            float(np.mean(hidden_flat)),
+            float(np.std(hidden_flat)),
+            float(np.min(hidden_flat)),
+            float(np.max(hidden_flat))
+        ])
+    
+    # Add attention statistics if available
+    if attention_scores is not None:
+        att = attention_scores.detach().cpu().numpy().flatten()
+        features.extend([
+            float(np.mean(att)),
+            float(np.std(att)),
+            float(np.min(att)),
+            float(np.max(att))
+        ])
+    
+    # Convert to tensor
+    return torch.tensor(features, dtype=torch.float32)
