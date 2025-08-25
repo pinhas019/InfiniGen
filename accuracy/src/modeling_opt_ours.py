@@ -227,6 +227,22 @@ class OPTAttention(nn.Module):
                 ind = ind.repeat(1,tgt_len-(i+1),1)
                 attn[:, (i + 1):] = attn[:, (i + 1):].scatter(-1, ind, -10000)
 
+            elif self.eviction_policy == "arc":
+                beta = getattr(self, "arc_beta", 0.5)   
+                window = max(1, int(i // 2))  
+                freq = torch.sum(fetch_mask[:, :i + 1, :window], dim=1, keepdim=True)
+                steps = torch.arange(i + 1, device=attn.device, dtype=attn.dtype).view(1, -1, 1)
+                last_seen = torch.argmax(fetch_mask[:, :i + 1, :window] * steps, dim=1, keepdim=True)  
+                age = (i - last_seen).to(attn.dtype)
+                age_norm = age / (float(i) if i > 0 else 1.0)
+                freq_max = freq.max(dim=-1, keepdim=True).values
+                freq_max = torch.clamp(freq_max, min=torch.tensor(1.0, device=freq.device, dtype=freq.dtype))
+                freq_norm = freq / freq_max
+                score = beta * age_norm + (1.0 - beta) * (1.0 - freq_norm)
+                ind = torch.argmax(score, dim=-1, keepdim=True)
+                ind = ind.repeat(1, tgt_len - (i + 1), 1)
+                attn[:, (i + 1):] = attn[:, (i + 1):].scatter(-1, ind, -10000)
+
             else:
                 raise NotImplementedError
 
