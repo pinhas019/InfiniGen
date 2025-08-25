@@ -163,7 +163,7 @@ class OPTAttention(nn.Module):
         self.alpha = 4
         self.capacity = 1.0
         self.budget = 0.1
-        self.eviction_policy = "counter"
+        self.eviction_policy = "arc"
         self.density = None
         ##############
 
