@@ -37,6 +37,7 @@ from ...utils import (
     replace_return_docstrings,
 )
 from .configuration_opt import OPTConfig
+from .mlp_eviction_controller import EvictionMLP, get_eviction_indices
 
 
 logger = logging.get_logger(__name__)
@@ -163,7 +164,8 @@ class OPTAttention(nn.Module):
         self.alpha = 4
         self.capacity = 1.0
         self.budget = 0.1
-        self.eviction_policy = "counter"
+        self.eviction_policy = "mlp"
+        self.eviction_mlp = EvictionMLP(input_dim=2)
         self.density = None
         ##############
 
@@ -226,6 +228,9 @@ class OPTAttention(nn.Module):
                 _, ind = torch.min(counter, dim = -1, keepdim = True) #heads, 1, 1
                 ind = ind.repeat(1,tgt_len-(i+1),1)
                 attn[:, (i + 1):] = attn[:, (i + 1):].scatter(-1, ind, -10000)
+
+            elif self.eviction_policy == "mlp":
+                attn = get_eviction_indices(attn, fetch_mask, self.eviction_mlp, i)
 
             else:
                 raise NotImplementedError
@@ -987,6 +992,7 @@ class OPTForCausalLM(OPTPreTrainedModel):
                 If `past_key_values` are used, the user can optionally input only the last `decoder_input_ids` (those
                 that don't have their past key value states given to this model) of shape `(batch_size, 1)` instead of
                 all `decoder_input_ids` of shape `(batch_size, sequence_length)`.
+
             inputs_embeds (`torch.FloatTensor` of shape `(batch_size, sequence_length, hidden_size)`, *optional*):
                 Optionally, instead of passing `input_ids` you can choose to directly pass an embedded representation.
                 This is useful if you want more control over how to convert `input_ids` indices into associated vectors

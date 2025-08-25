@@ -185,7 +185,7 @@ if __name__ == '__main__':
     parser.add_argument("--alpha", type=float, default=0.0)
     parser.add_argument("--budget", type=float, default=0.0)
     parser.add_argument("--capacity", type=float, default=0.0)
-    parser.add_argument("--eviction_policy", type=str, default="lru")
+    parser.add_argument("--eviction_policy", type=str, default="mlp")
     
     args = parser.parse_args()
     

@@ -26,7 +26,7 @@ done
 
 for size in 6.7b 13b 30b;do
   for dataset in "wikitext2" "ptb";do
-    for evict in fifo lru counter;do
+    for evict in fifo lru counter mlp;do
       echo opt-$size ${dataset} 80% cache evict ${evict}
       python opt.py --model "../setup/opt-model/opt-${size}" \
       --eval_dataset ${dataset} \
@@ -68,7 +68,7 @@ done
 
 for size in 7b 13b;do
   for dataset in "wikitext2" "ptb";do
-    for evict in fifo lru counter;do
+    for evict in fifo lru counter mlp;do
       echo llama-2-${size} ${dataset} 80% cache evict ${evict}
       python llama.py --model "${LLAMA_PATH}/llama-2-${size}" \
         --eval_dataset ${dataset} \

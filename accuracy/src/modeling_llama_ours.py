@@ -31,6 +31,7 @@ from ...modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast,
 from ...modeling_utils import PreTrainedModel
 from ...utils import add_start_docstrings, add_start_docstrings_to_model_forward, logging, replace_return_docstrings
 from .configuration_llama import LlamaConfig
+from .mlp_eviction_controller import EvictionMLP, get_eviction_indices
 
 
 logger = logging.get_logger(__name__)
@@ -192,7 +193,8 @@ class LlamaAttention(nn.Module):
         self.alpha = 5
         self.capacity = 1.0
         self.budget = 0.2
-        self.eviction_policy = "counter"
+        self.eviction_policy = "mlp"
+        self.eviction_mlp = EvictionMLP(input_dim=2)
         self.density = None
         ###############################
 
@@ -231,12 +233,13 @@ class LlamaAttention(nn.Module):
         fetch_mask[:, :fetch_max] = torch.tril(torch.ones((fetch_max, src_len), dtype = attn.dtype, device = attn.device)).unsqueeze(0)
 
         for i in range(fetch_max, store_max):
-            _, ind = torch.topk(attn[:,i, :i+1], k = fetch_num[i], dim = -1)
-            fetch_mask[:, i, :i+1] = fetch_mask[:, i, :i + 1].scatter(-1, ind, 1)
+            _, ind = torch.topk(attn[:, i, : i + 1], k=fetch_num[i], dim=-1)
+            fetch_mask[:, i, : i + 1] = fetch_mask[:, i, : i + 1].scatter(-1, ind, 1)
 
         for i in range(store_max, tgt_len):
-            _, ind = torch.topk(attn[:,i, :i+1], k = fetch_num[i], dim = -1)
-            fetch_mask[:, i, :i + 1] = fetch_mask[:, i, :i + 1].scatter(-1, ind, 1)
+            _, ind = torch.topk(attn[:, i, : i + 1], k=fetch_num[i], dim=-1)
+            # use the same row `i` on the RHS when scattering (fix off-by-one bug)
+            fetch_mask[:, i, : i + 1] = fetch_mask[:, i, : i + 1].scatter(-1, ind, 1)
 
             if i == (tgt_len - 1):
                 continue
@@ -260,6 +263,9 @@ class LlamaAttention(nn.Module):
                 _, ind = torch.min(counter, dim = -1, keepdim = True) #heads, 1, 1
                 ind = ind.repeat(1,tgt_len-(i+1),1)
                 attn[:, (i + 1):] = attn[:, (i + 1):].scatter(-1, ind, -10000)
+
+            elif self.eviction_policy == "mlp":
+                attn = get_eviction_indices(attn, fetch_mask, self.eviction_mlp, i)
 
             else:
                 raise NotImplementedError
