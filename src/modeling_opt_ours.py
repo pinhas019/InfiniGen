@@ -146,9 +146,9 @@ class OPTAttention(nn.Module):
         self.scaling = self.head_dim**-0.5
         self.is_decoder = is_decoder
 
-        self.k_proj = nn.Linear(embed_dim, embed_dim+1, bias=False)
+        self.k_proj = nn.Linear(embed_dim, embed_dim, bias=False)
         self.v_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
-        self.q_proj = nn.Linear(embed_dim, embed_dim+1, bias=False)
+        self.q_proj = nn.Linear(embed_dim, embed_dim, bias=False)
         self.out_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
         self.attn = None
 
@@ -269,38 +269,38 @@ class OPTAttention(nn.Module):
         self.current_hidden_states = hidden_states.clone()
 
         ### Ours  ###########################################
-        new_attn_in = torch.cat((hidden_states, torch.ones(bsz, tgt_len, 1).to(hidden_states.device).to(hidden_states.dtype)), dim = -1)
-        query_states = torch.matmul(new_attn_in, self.q_proj.weight.data)
+        query_states = self.q_proj(hidden_states) * self.scaling
+        key_states   = self.k_proj(hidden_states)
+        value_states = self.v_proj(hidden_states)
 
+        # reshape to heads and concat past if any  -> shape: (bsz, num_heads, seq_len, head_dim)
+        key_states   = self._shape(key_states,   -1, bsz)
+        value_states = self._shape(value_states, -1, bsz)
         if past_key_value is not None:
-            key_states = self._shape(self.k_proj(hidden_states), -1, bsz)
-            value_states = self._shape(self.v_proj(hidden_states), -1, bsz)
-            key_states = torch.cat([past_key_value[0], key_states], dim=2)
+            key_states   = torch.cat([past_key_value[0], key_states], dim=2)
             value_states = torch.cat([past_key_value[1], value_states], dim=2)
-        else:
-            key_states = self._shape(torch.matmul(new_attn_in, self.k_proj.weight.data), -1, bsz)
-            value_states = self._shape(self.v_proj(hidden_states), -1, bsz)
 
-        if self.is_decoder:
-            past_key_value = (key_states, value_states)
-        
-        proj_shape = (bsz * self.num_heads, -1, self.head_dim)
+        # SAVE CACHE **before** flattening heads
+        present_key_value = (key_states, value_states) if self.is_decoder else None
+
+        # now flatten heads for compute
+        proj_shape   = (bsz * self.num_heads, -1, self.head_dim)
         query_states = self._shape(query_states, tgt_len, bsz).view(*proj_shape)
-        key_states = key_states.view(*proj_shape)
-        value_states = value_states.view(*proj_shape)
+        key_f        = key_states.view(*proj_shape)
+        value_f      = value_states.view(*proj_shape)
 
         ### Speculate attention ###
         if (self.previous_hidden_states is not None) and (self.partial_weight_q is not None):
             query = torch.matmul(self.previous_hidden_states, self.partial_weight_q)
             query = self._shape(query, tgt_len, bsz).view(*proj_shape)
-            attn = torch.matmul(query, key_states.transpose(1, 2))
+            attn = torch.matmul(query, key_f.transpose(1, 2))
 
             attn_mask, density = self.kv_cache_mask(attn)
             self.density = density
         ###########################
 
-        src_len = key_states.size(1)
-        attn_weights = torch.matmul(query_states, key_states.transpose(1, 2))
+        src_len = key_f.size(1)
+        attn_weights = torch.matmul(query_states, key_f.transpose(1, 2))
         
         if attn_weights.size() != (bsz * self.num_heads, tgt_len, src_len):
             raise ValueError(
@@ -309,21 +309,29 @@ class OPTAttention(nn.Module):
             )
 
         if attention_mask is not None:
+            # If decoder supplied a 1×src_len mask (common on incremental steps), expand it to tgt_len×src_len
+            if attention_mask.size() == (bsz, 1, 1, src_len) and tgt_len > 1:
+                attention_mask = attention_mask.expand(bsz, 1, tgt_len, src_len)
+
             if attention_mask.size() != (bsz, 1, tgt_len, src_len):
                 raise ValueError(
                     f"Attention mask should be of size {(bsz, 1, tgt_len, src_len)}, but is {attention_mask.size()}"
                 )
-            attn_weights = attn_weights.view(bsz, self.num_heads, tgt_len, src_len) + attention_mask
-            attn_weights = torch.max(attn_weights, torch.tensor(torch.finfo(attn_weights.dtype).min))
+
+            attn_weights = attn_weights.view(bsz, self.num_heads, tgt_len, src_len)
+            attn_weights = attn_weights + attention_mask
+            attn_weights = torch.max(
+                attn_weights,
+                torch.tensor(torch.finfo(attn_weights.dtype).min, device=attn_weights.device),
+            )
             attn_weights = attn_weights.view(bsz * self.num_heads, tgt_len, src_len)
 
         ### Apply mask ###
         if (self.previous_hidden_states is not None) and (self.partial_weight_q is not None):
             attn_weights = attn_weights + attn_mask
         ###########################
-        attn_weights = torch.max(attn_weights, torch.tensor(torch.finfo(attn_weights.dtype).min))
 
-        attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(torch.float16)
+        attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
         #########################################################################
 
         if layer_head_mask is not None:
@@ -347,7 +355,7 @@ class OPTAttention(nn.Module):
 
         attn_probs = nn.functional.dropout(attn_weights, p=self.dropout, training=self.training)
 
-        attn_output = torch.bmm(attn_probs, value_states)
+        attn_output = torch.bmm(attn_probs, value_f)
 
         if attn_output.size() != (bsz * self.num_heads, tgt_len, self.head_dim):
             raise ValueError(
@@ -364,7 +372,7 @@ class OPTAttention(nn.Module):
 
         attn_output = self.out_proj(attn_output)
 
-        return attn_output, attn_weights_reshaped, past_key_value
+        return attn_output, attn_weights_reshaped, present_key_value
 
 
 class OPTDecoderLayer(nn.Module):
@@ -731,7 +739,11 @@ class OPTDecoder(OPTPreTrainedModel):
             inputs_embeds = self.embed_tokens(input_ids)
 
         batch_size, seq_length = input_shape
-        past_key_values_length = past_key_values[0][0].shape[2] if past_key_values is not None else 0
+        if past_key_values is not None and len(past_key_values) > 0 and past_key_values[0] is not None:
+            past_key_values_length = past_key_values[0][0].shape[2]
+        else:
+            past_key_values_length = 0
+
         # required mask seq length can be calculated via length of past
         mask_seq_length = past_key_values_length + seq_length
 
@@ -812,8 +824,7 @@ class OPTDecoder(OPTPreTrainedModel):
                     cur_device = self.layers[idx].self_attn.current_hidden_states.device
                     cur_dtype = self.layers[idx].self_attn.current_hidden_states.dtype
                     cur_bsz, cur_tgt_len, _ = self.layers[idx].self_attn.current_hidden_states.shape
-                    self.layers[idx + 1].self_attn.previous_hidden_states = torch.cat((self.layers[idx].self_attn.current_hidden_states, 
-                                                                                       torch.ones(cur_bsz, cur_tgt_len, 1).to(cur_device).to(cur_dtype)), dim = -1)
+                    self.layers[idx + 1].self_attn.previous_hidden_states = (self.layers[idx].self_attn.current_hidden_states)
                 ##############
 
             hidden_states = layer_outputs[0]
