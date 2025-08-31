@@ -7,6 +7,11 @@ for model in llama opt;do
   mv ${model}/modeling_${model}.py ${model}/modeling_${model}_orig.py
 done
 
+# Copy the additional modules for mlp eviction policy into the transformers dir. 
+for module in feature_cache.py mlp_eviction_controller.py;do
+  cp -f ../${CWD}/src/${module} ./opt/${module}
+done
+
 cd ${CWD}
 
 # ========= InfiniGen ============

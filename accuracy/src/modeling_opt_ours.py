@@ -37,6 +37,7 @@ from ...utils import (
     replace_return_docstrings,
 )
 from .configuration_opt import OPTConfig
+from .feature_cache import FeatureCache
 from .mlp_eviction_controller import EvictionMLP, get_eviction_indices
 
 
@@ -166,6 +167,7 @@ class OPTAttention(nn.Module):
         self.budget = 0.1
         self.eviction_policy = "mlp"
         self.eviction_mlp = EvictionMLP(input_dim=2)
+        self.feature_cache = None
         self.density = None
         ##############
 
@@ -196,15 +198,20 @@ class OPTAttention(nn.Module):
 
         store_max = int(src_len * self.capacity)
 
+        if self.feature_cache is None:
+            self.feature_cache = FeatureCache(heads, src_len, attn.device)
+
         fetch_mask[:, :fetch_max] = torch.tril(torch.ones((fetch_max, src_len), dtype = attn.dtype, device = attn.device)).unsqueeze(0)
 
         for i in range(fetch_max, store_max):
             _, ind = torch.topk(attn[:,i, :i+1], k = fetch_num[i], dim = -1)
             fetch_mask[:, i, :i+1] = fetch_mask[:, i, :i + 1].scatter(-1, ind, 1)
+            self.feature_cache.update(fetch_mask, i)
 
         for i in range(store_max, tgt_len):
             _, ind = torch.topk(attn[:,i, :i+1], k = fetch_num[i], dim = -1)
             fetch_mask[:, i, :i + 1] = fetch_mask[:, i, :i + 1].scatter(-1, ind, 1)
+            self.feature_cache.update(fetch_mask, i)
 
             if i == (tgt_len - 1):
                 continue
@@ -230,7 +237,7 @@ class OPTAttention(nn.Module):
                 attn[:, (i + 1):] = attn[:, (i + 1):].scatter(-1, ind, -10000)
 
             elif self.eviction_policy == "mlp":
-                attn = get_eviction_indices(attn, fetch_mask, self.eviction_mlp, i)
+                attn = get_eviction_indices(attn, self.eviction_mlp, self.feature_cache, i)
 
             else:
                 raise NotImplementedError

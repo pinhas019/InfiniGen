@@ -31,6 +31,7 @@ from ...modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast,
 from ...modeling_utils import PreTrainedModel
 from ...utils import add_start_docstrings, add_start_docstrings_to_model_forward, logging, replace_return_docstrings
 from .configuration_llama import LlamaConfig
+from .feature_cache import FeatureCache
 from .mlp_eviction_controller import EvictionMLP, get_eviction_indices
 
 
@@ -195,6 +196,7 @@ class LlamaAttention(nn.Module):
         self.budget = 0.2
         self.eviction_policy = "mlp"
         self.eviction_mlp = EvictionMLP(input_dim=2)
+        self.feature_cache = None
         self.density = None
         ###############################
 
@@ -230,16 +232,21 @@ class LlamaAttention(nn.Module):
 
         store_max = int(src_len * self.capacity)
 
+        if self.feature_cache is None:
+            self.feature_cache = FeatureCache(heads, src_len, attn.device)
+
         fetch_mask[:, :fetch_max] = torch.tril(torch.ones((fetch_max, src_len), dtype = attn.dtype, device = attn.device)).unsqueeze(0)
 
         for i in range(fetch_max, store_max):
             _, ind = torch.topk(attn[:, i, : i + 1], k=fetch_num[i], dim=-1)
             fetch_mask[:, i, : i + 1] = fetch_mask[:, i, : i + 1].scatter(-1, ind, 1)
+            self.feature_cache.update(fetch_mask, i)
 
         for i in range(store_max, tgt_len):
             _, ind = torch.topk(attn[:, i, : i + 1], k=fetch_num[i], dim=-1)
             # use the same row `i` on the RHS when scattering (fix off-by-one bug)
             fetch_mask[:, i, : i + 1] = fetch_mask[:, i, : i + 1].scatter(-1, ind, 1)
+            self.feature_cache.update(fetch_mask, i)
 
             if i == (tgt_len - 1):
                 continue
@@ -248,6 +255,27 @@ class LlamaAttention(nn.Module):
             if self.eviction_policy == "fifo":
                 evict_idx = i - store_max
                 attn[:, (i + 1):, evict_idx] = -10000
+            
+            elif self.eviction_policy == "lru":
+                idx = torch.arange(i + 1, device = attn.device).unsqueeze(0).unsqueeze(-1)
+                idx = idx * fetch_mask[:, :i + 1, :int(i / 2)] # avoid evicting recently added ones
+                # Most recently fetched idx per each KV cache
+                _, idx = torch.max(idx, dim = 1, keepdim = True) # heads, 1, i/2
+                _, ind = torch.min(idx, dim = -1, keepdim = True) # heads, 1, 1
+                ind = ind.repeat(1, tgt_len - (i + 1), 1)
+                attn[:, (i + 1):] = attn[:, (i + 1):].scatter(-1, ind, -10000)
+
+            elif self.eviction_policy == "counter":
+                counter = torch.sum(fetch_mask[:, :i + 1, :int(i / 2)], dim = 1, keepdim = True) #heads, 1, i/2
+                _, ind = torch.min(counter, dim = -1, keepdim = True) #heads, 1, 1
+                ind = ind.repeat(1,tgt_len-(i+1),1)
+                attn[:, (i + 1):] = attn[:, (i + 1):].scatter(-1, ind, -10000)
+
+            elif self.eviction_policy == "mlp":
+                attn = get_eviction_indices(attn, self.eviction_mlp, self.feature_cache, i)
+
+            else:
+                raise NotImplementedError
 
             elif self.eviction_policy == "lru":
                 idx = torch.arange(i + 1, device = attn.device).unsqueeze(0).unsqueeze(-1)
