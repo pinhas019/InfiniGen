@@ -15,7 +15,7 @@
 """ PyTorch OPT model."""
 import random
 from typing import List, Optional, Tuple, Union
-
+from builtins import max as builtin_max
 import torch
 import torch.utils.checkpoint
 from torch import nn
@@ -228,8 +228,8 @@ class OPTAttention(nn.Module):
                 attn[:, (i + 1):] = attn[:, (i + 1):].scatter(-1, ind, -10000)
 
             elif self.eviction_policy == "arc":
-                beta = getattr(self, "arc_beta", 0.5)   
-                window = max(1, int(i // 2))  
+                beta = getattr(self, "arc_beta", 0.5)
+                window = builtin_max(1, int(i // 2))
                 freq = torch.sum(fetch_mask[:, :i + 1, :window], dim=1, keepdim=True)
                 steps = torch.arange(i + 1, device=attn.device, dtype=attn.dtype).view(1, -1, 1)
                 last_seen = torch.argmax(fetch_mask[:, :i + 1, :window] * steps, dim=1, keepdim=True)  
